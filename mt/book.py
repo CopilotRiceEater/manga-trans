@@ -238,22 +238,16 @@ def stage_render(book: Path, fonts=None, tag=None, progress=_noop):
     out = book / (f"ko_{tag}" if tag else "ko")
     faces = {role: letter.face(p) for role, p in {**letter.DEFAULT_FONTS, **(fonts or {})}.items()}
     out.mkdir(exist_ok=True)
-    # 1차: 페이지마다 계획 → 작품 글자 크기 통계용 블록만 모으고, 그림 위 글은 지워 둔다(clean/ 캐시).
-    # 페이지 이미지·마스크는 페이지 크기라 수백 쪽을 다 들고 있으면 RAM이 모자라서 2차에서 다시 계획한다.
+    # 1차: 페이지마다 계획만 세워 작품 글자 크기 통계용 블록을 모은다(빠름).
+    # 2차: 페이지마다 다시 계획 → 그림 위 글 지우기(clean/ 캐시) → 식자 → 저장. 그래서 식자가 시작되면 바로 한 쪽씩 보인다.
+    # 페이지 이미지·마스크는 페이지 크기라 수백 쪽을 다 들고 있으면 RAM이 모자라서 1차 계획은 버린다.
     live, need = [], []
     cdir = book / "clean"
     for k, name in enumerate(ocr):
         page = Image.open(book / "src" / name).convert("RGB")
         plan = plan_page(np.asarray(page), page_blocks(book, name, ocr, trans))
         live += [b for b, _, m in plan if m != "keep"]
-        masks = [it.mask for _, it, m in plan if m == "sanitize"]
-        if masks:
-            from inpaint import clean
-            need.append(name)
-            cdir.mkdir(exist_ok=True)
-            print(f"그림 위 글 지우기({config.INPAINT}): {name}")
-            clean(book / "src" / name, page, masks, _clean_path(cdir, name))
-        del page, plan, masks
+        del page, plan
         progress(k + 1, 2 * len(ocr), name)
     from engine import book_base, glyph_est
     base = book_base(live)
@@ -263,15 +257,27 @@ def stage_render(book: Path, fonts=None, tag=None, progress=_noop):
     bible = load_json(book / "bible.json")
     print(f"기본 글자 크기 {base}px (하한 {round(base * 0.8)}px)")
     report = {}
-    for k, name in enumerate(ocr):
-        page = Image.open(book / "src" / name).convert("RGB")
-        plan = plan_page(np.asarray(page), page_blocks(book, name, ocr, trans))
-        cl = _clean_path(cdir, name) if name in need else None
-        img, log = render_page(page, plan, cl, base, median_g, shorten_cached(book, name, bible), faces,
-                               ocr[name].get("panels"))
-        img.save(out / f"{Path(name).stem}.png")
-        report[name] = log
-        progress(len(ocr) + k + 1, 2 * len(ocr), name)
+    try:
+        for k, name in enumerate(ocr):
+            page = Image.open(book / "src" / name).convert("RGB")
+            plan = plan_page(np.asarray(page), page_blocks(book, name, ocr, trans))
+            masks = [it.mask for _, it, m in plan if m == "sanitize"]
+            cl = None
+            if masks:
+                from inpaint import clean
+                need.append(name)
+                cdir.mkdir(exist_ok=True)
+                print(f"그림 위 글 지우기({config.INPAINT}): {name}")
+                cl = clean(book / "src" / name, page, masks, _clean_path(cdir, name))
+            img, log = render_page(page, plan, cl, base, median_g, shorten_cached(book, name, bible), faces,
+                                   ocr[name].get("panels"))
+            img.save(out / f"{Path(name).stem}.png")
+            report[name] = log
+            progress(len(ocr) + k + 1, 2 * len(ocr), name)
+    finally:
+        if config.INPAINT == "moss":       # 이 작업이 띄운 ComfyUI는 끝나면(실패해도) 바로 내린다(놀면서 VRAM을 잡지 않게)
+            from comfy import stop
+            stop()
     save_json(out / "render.json", report)
     scores, unplaced = [], []
     for name, log in report.items():
