@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>만화 번역</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1c1a; --muted: #6f6b64; --line: #e3e0da;
+  --accent: #d2452b; --accent-ink: #fff; --ok: #2f8a4c; --warn: #b7791f; --err: #c53030;
+  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #161514; --panel: #201f1d; --ink: #ecebe8; --muted: #9b968e; --line: #34322f;
+          --accent: #ef6a4f; --shadow: none; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 15px/1.5 "Pretendard", "Noto Sans KR", system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line);
+         background: var(--panel); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 18px; margin: 0; letter-spacing: -.02em; cursor: pointer; }
+header .sp { flex: 1; }
+.queue { font-size: 13px; color: var(--muted); }
+main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 60px; }
+button, select, input[type=text] { font: inherit; color: inherit; }
+button { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { color: var(--err); }
+button:disabled { opacity: .5; cursor: default; }
+select, input[type=text] { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 7px 10px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+
+/* 업로드 */
+#drop { padding: 28px; text-align: center; border: 2px dashed var(--line); border-radius: 12px; margin-bottom: 22px;
+        transition: border-color .15s, background .15s; }
+#drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
+#drop p { margin: 4px 0; color: var(--muted); }
+#drop .big { font-size: 17px; color: var(--ink); font-weight: 600; }
+#drop .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+#picked { font-size: 13px; color: var(--muted); margin-top: 8px; min-height: 1.5em; }
+
+/* 작품 목록 */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+.book { overflow: hidden; display: flex; flex-direction: column; cursor: pointer; }
+.book .cover { aspect-ratio: 3/4; background: var(--line) center/cover no-repeat; }
+.book .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+.book .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meta { font-size: 13px; color: var(--muted); }
+.badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; }
+.badge.done { color: var(--ok); } .badge.running, .badge.queued { color: var(--warn); }
+.badge.error { color: var(--err); } .badge.new { color: var(--muted); }
+.bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.empty { color: var(--muted); text-align: center; padding: 40px 0; }
+
+/* 작품 화면 */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+.toolbar h2 { margin: 0 8px 0 0; font-size: 20px; }
+.toolbar .sp { flex: 1; }
+.status-line { margin: -4px 0 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.status-line .bar { width: 220px; }
+.err { color: var(--err); font-size: 14px; }
+.pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.page { cursor: pointer; overflow: hidden; }
+.page img { width: 100%; display: block; aspect-ratio: 3/4; object-fit: cover; object-position: top; background: var(--line); }
+.page .cap { padding: 6px 8px; font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; }
+details.bible { margin-bottom: 16px; padding: 10px 14px; }
+details.bible summary { cursor: pointer; font-weight: 600; }
+details.bible table { border-collapse: collapse; margin: 6px 0 10px; font-size: 14px; }
+details.bible td, details.bible th { border-bottom: 1px solid var(--line); padding: 4px 10px 4px 0; text-align: left; vertical-align: top; }
+
+/* 뷰어 */
+#viewer { position: fixed; inset: 0; background: rgba(10,10,10,.92); display: none; z-index: 20; color: #eee; }
+#viewer.open { display: flex; flex-direction: column; }
+#viewer .vbar { display: flex; gap: 8px; align-items: center; padding: 10px 14px; }
+#viewer .vbar button, #viewer .vbar select { background: #2a2927; color: #eee; border-color: #444; }
+#viewer .vbar .sp { flex: 1; }
+#viewer .stage { flex: 1; display: flex; gap: 12px; min-height: 0; padding: 0 14px 14px; }
+#viewer .imgs { flex: 1; display: flex; gap: 10px; justify-content: center; min-width: 0; }
+#viewer .imgs figure { margin: 0; flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; }
+#viewer .imgs figcaption { font-size: 12px; color: #aaa; margin-bottom: 4px; }
+#viewer .imgs img { max-width: 100%; max-height: calc(100vh - 90px); object-fit: contain; background: #fff; }
+#viewer.single .imgs figure.src { display: none; }
+#viewer aside { width: 320px; overflow: auto; font-size: 13px; background: #1c1b1a; border-radius: 8px; padding: 8px 10px; }
+#viewer aside .blk { padding: 6px 0; border-bottom: 1px solid #333; }
+#viewer aside .ja { color: #999; }
+#viewer aside .tag { font-size: 11px; color: #888; }
+@media (max-width: 900px) { #viewer aside { display: none; } #viewer .imgs img { max-height: calc(100vh - 80px); } }
+</style>
+</head>
+<body>
+<header>
+  <h1 onclick="go('')">만화 번역</h1>
+  <span class="sp"></span>
+  <span class="queue" id="queue"></span>
+</header>
+<main id="app"></main>
+
+<div id="viewer">
+  <div class="vbar">
+    <button onclick="closeViewer()">닫기 (Esc)</button>
+    <button onclick="step(-1)">← 이전</button>
+    <button onclick="step(1)">다음 →</button>
+    <span id="vpos"></span>
+    <span class="sp"></span>
+    <select id="vmode" onchange="setMode(this.value)">
+      <option value="both">원본 · 번역 나란히</option>
+      <option value="single">번역본만</option>
+    </select>
+  </div>
+  <div class="stage">
+    <div class="imgs">
+      <figure class="src"><figcaption>원본</figcaption><img id="vsrc" alt=""></figure>
+      <figure class="ko"><figcaption>번역</figcaption><img id="vko" alt=""></figure>
+    </div>
+    <aside id="vblocks"></aside>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const app = $('#app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const STATUS = {new: '대기', queued: '순서 기다림', running: '진행 중', done: '완료', error: '오류'};
+let current = null, timer = null, viewer = {i: 0, pages: []};
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m } catch {} throw new Error(m); }
+  return r.json();
+}
+function go(id) { location.hash = id ? '#/' + id : ''; }
+window.addEventListener('hashchange', route);
+
+function route() {
+  clearTimeout(timer);
+  shownBook = null;
+  let id = location.hash.replace(/^#\/?/, '');
+  if (!/^[\w-]*$/.test(id)) id = '';     // 작품 ID 형식만 (onclick·API 경로에 그대로 들어간다)
+  current = id || null;
+  id ? showBook(id) : showList();
+}
+
+/* ---------- 목록 + 업로드 ---------- */
+function showList() {
+  app.innerHTML = `
+    <div id="drop" class="card">
+      <p class="big">만화 페이지를 끌어다 놓으세요</p>
+      <p>PNG · JPG · WebP · AVIF 이미지 여러 장, 또는 ZIP / CBZ 묶음</p>
+      <div class="row">
+        <input type="text" id="title" placeholder="작품 이름 (비우면 파일 이름)">
+        <label><button type="button" onclick="$('#files').click()">파일 고르기</button></label>
+        <input type="file" id="files" multiple accept=".png,.jpg,.jpeg,.webp,.avif,.gif,.bmp,.zip,.cbz" hidden>
+        <button class="primary" id="upbtn" disabled onclick="upload()">올리고 번역 시작</button>
+      </div>
+      <div id="picked"></div>
+    </div>
+    <div class="grid" id="books"></div>`;
+  const drop = $('#drop'), input = $('#files');
+  ['dragenter', 'dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', ev => { input.files = ev.dataTransfer.files; picked(); });
+  input.addEventListener('change', picked);
+  refreshList();
+}
+function picked() {
+  const fs = [...$('#files').files];
+  $('#upbtn').disabled = !fs.length;
+  const mb = fs.reduce((a, f) => a + f.size, 0) / 1e6;
+  $('#picked').textContent = fs.length ? `${fs.length}개 파일 · ${mb.toFixed(1)}MB` : '';
+}
+async function upload() {
+  const fs = [...$('#files').files];
+  const fd = new FormData();
+  fs.forEach(f => fd.append('files', f));
+  fd.append('title', $('#title').value.trim());
+  fd.append('autorun', 'true');
+  $('#upbtn').disabled = true; $('#picked').textContent = '올리는 중…';
+  try { const m = await api('/api/books', {method: 'POST', body: fd}); go(m.id); }
+  catch (e) { $('#picked').textContent = '실패: ' + e.message; $('#upbtn').disabled = false; }
+}
+async function refreshList() {
+  if (current) return;
+  const books = await api('/api/books');
+  const el = $('#books');
+  if (!el || current) return;
+  if (!books.length) { el.innerHTML = '<div class="empty">아직 작품이 없어요</div>'; }
+  else {
+    el.querySelector('.empty')?.remove();
+    const ids = books.map(b => b.id);
+    [...el.children].forEach(c => { if (!ids.includes(c.dataset.id)) c.remove(); });
+    books.forEach((b, i) => {
+      let card = el.querySelector(`[data-id="${b.id}"]`);
+      if (!card) {
+        card = document.createElement('div');
+        card.className = 'book card'; card.dataset.id = b.id; card.onclick = () => go(b.id);
+        card.innerHTML = `<div class="cover"></div><div class="body"><div class="title"></div><div class="meta info"></div><div class="prog"></div></div>`;
+      }
+      if (el.children[i] !== card) el.insertBefore(card, el.children[i] || null);
+      const cover = `url("/api/books/${b.id}/img/${b.status === 'done' ? 'ko' : 'src'}/${firstPage(b)}?w=360&v=${b.finished || 0}")`;
+      const cv = card.querySelector('.cover');
+      if (cv.dataset.url !== cover) { cv.dataset.url = cover; cv.style.backgroundImage = cover; }
+      const t = card.querySelector('.title'); if (t.textContent !== b.title) { t.textContent = b.title; t.title = b.title; }
+      const info = `<span class="badge ${b.status}">${STATUS[b.status] || b.status}</span> · ${b.pages}쪽${b.summary ? ` · 점수 ${b.summary.avg}` : ''}`;
+      const inf = card.querySelector('.info'); if (inf.innerHTML !== info) inf.innerHTML = info;
+      const pg = progressBar(b), pe = card.querySelector('.prog');
+      if (pe.dataset.h !== pg) { pe.dataset.h = pg; pe.innerHTML = pg; }
+    });
+  }
+  updateQueue();
+  if (books.some(b => b.status === 'running' || b.status === 'queued')) timer = setTimeout(refreshList, 1500);
+}
+function firstPage(b) { return b.first || ''; }
+function progressBar(b) {
+  if (b.status !== 'running' || !b.progress) return '';
+  const [d, t] = b.progress, pct = t ? (100 * d / t) : 0;
+  return `<div class="meta">${esc(b.stage_label || '')} ${d}/${t}</div><div class="bar"><i style="width:${pct}%"></i></div>`;
+}
+async function updateQueue() {
+  try { const s = await api('/api/status'); $('#queue').textContent = s.current ? `작업 중 · 대기 ${s.queued}` : ''; } catch {}
+}
+
+/* ---------- 작품 화면 ----------
+   처음 한 번만 전체를 그리고(shell), 진행 중 폴링 때는 바뀐 부분만 고친다(이미지 요소를 새로 만들면 깜빡임). */
+let shownBook = null;
+async function showBook(id) {
+  let b;
+  try { b = await api('/api/books/' + id); } catch (e) { app.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (current !== id) return;
+  if (shownBook !== id || !$('#pages')) { renderBookShell(id, b); shownBook = id; }
+  updateBook(id, b);
+  updateQueue();
+  if (b.status === 'running' || b.status === 'queued') timer = setTimeout(() => showBook(id), 1500);
+}
+function renderBookShell(id, b) {
+  app.innerHTML = `
+    <div class="toolbar">
+      <button onclick="go('')">← 목록</button>
+      <h2>${esc(b.title)}</h2>
+      <span class="badge" id="bbadge"></span>
+      <span class="sp"></span>
+      <select id="fmt">
+        <option value="png">PNG</option><option value="avif">AVIF</option>
+        <option value="webp">WebP</option><option value="jpg">JPG</option>
+      </select>
+      <button class="primary" id="bdl" onclick="download('${id}','ko')">번역본 받기</button>
+      <button onclick="download('${id}','src')">원본 받기</button>
+      <button class="busy-off" onclick="rerun('${id}','render')" title="번역은 그대로, 식자만 다시">식자만 다시</button>
+      <button class="busy-off" onclick="rerun('${id}','all')" title="OCR부터 처음부터">처음부터 다시</button>
+      <button class="danger busy-off" onclick="del('${id}')">삭제</button>
+    </div>
+    <div class="status-line">
+      <span id="bstage"></span><div class="bar" id="bbar"><i></i></div>
+      <span class="err" id="berr"></span><span class="meta" id="bsum"></span>
+    </div>
+    <div id="bbible"></div>
+    <div class="pages" id="pages">${b.pages_detail.map((p, i) => `
+      <div class="page card" onclick="openViewer(${i})">
+        <img loading="lazy" alt="">
+        <div class="cap"><span>${i + 1}쪽</span><span class="tag"></span></div>
+      </div>`).join('')}</div>`;
+}
+function setText(sel, t) { const e = $(sel); if (e && e.textContent !== t) e.textContent = t; }
+function updateBook(id, b) {
+  const busy = b.status === 'running' || b.status === 'queued';
+  const badge = $('#bbadge');
+  badge.className = 'badge ' + b.status;
+  setText('#bbadge', STATUS[b.status] || b.status);
+  $('#bdl').disabled = b.status !== 'done';
+  document.querySelectorAll('.busy-off').forEach(x => x.disabled = busy);
+  const pr = b.progress || [0, 0];
+  setText('#bstage', busy ? `${b.stage_label || '순서 기다리는 중'} ${b.progress ? pr[0] + '/' + pr[1] : ''}` : '');
+  $('#bbar').style.display = busy ? '' : 'none';
+  $('#bbar > i').style.width = (pr[1] ? 100 * pr[0] / pr[1] : 0) + '%';
+  setText('#berr', b.status === 'error' ? b.error : '');
+  const sm = b.summary;
+  setText('#bsum', sm && !busy ? `${b.pages}쪽 · 블록 ${sm.blocks}개 · 평균 점수 ${sm.avg} · 기본 글자 ${sm.base_px}px` +
+    (b.elapsed ? ` · ${b.elapsed}초` : '') + (sm.sanitized?.length ? ` · 그림 위 글 지움 ${sm.sanitized.length}쪽` : '') : '');
+  const bh = bibleHtml(b.bible), bb = $('#bbible');
+  if (bb.dataset.h !== bh) { const open = bb.querySelector('details')?.open; bb.innerHTML = bh; bb.dataset.h = bh;
+                             if (open) bb.querySelector('details').open = true; }
+  const cards = document.querySelectorAll('#pages .page');
+  b.pages_detail.forEach((p, i) => {
+    const card = cards[i]; if (!card) return;
+    const url = `/api/books/${id}/img/${p.translated ? 'ko' : 'src'}/${p.name}?w=360&v=${p.v}`;
+    const img = card.querySelector('img');
+    if (img.dataset.url !== url) {          // 바뀐 페이지만 새로 받는다 — 다 받은 뒤 바꿔 끼워서 깜빡임 없음
+      img.dataset.url = url;
+      if (!img.getAttribute('src')) img.src = url;
+      else { const pre = new Image(); pre.onload = () => { if (img.dataset.url === url) img.src = url; }; pre.src = url; }
+    }
+    setText(`#pages .page:nth-child(${i + 1}) .tag`, p.translated ? '' : '원본');
+  });
+  viewer.pages = b.pages_detail; viewer.book = id;
+}
+function bibleHtml(bb) {
+  if (!bb) return '';
+  const rows = (arr, cols) => (arr || []).map(r => `<tr>${cols.map(c => `<td>${esc(r[c])}</td>`).join('')}</tr>`).join('');
+  return `<details class="bible card"><summary>작품 설정집 (자동 생성)</summary>
+    <p>${esc(bb.synopsis)}</p>
+    <table><tr><th>인물</th><th>원문</th><th>성별</th><th>말투</th></tr>${rows(bb.characters, ['ko', 'ja', 'gender', 'speech'])}</table>
+    <table><tr><th>용어</th><th>원문</th><th>설명</th></tr>${rows(bb.terms, ['ko', 'ja', 'note'])}</table>
+  </details>`;
+}
+function download(id, which) { location.href = `/api/books/${id}/export?fmt=${$('#fmt').value}&which=${which}`; }
+async function rerun(id, mode) {
+  const fd = new FormData(); fd.append('mode', mode);
+  await api(`/api/books/${id}/run`, {method: 'POST', body: fd}); showBook(id);
+}
+async function del(id) {
+  if (!confirm('이 작품을 지울까요? 원본과 번역본이 모두 지워져요.')) return;
+  await api('/api/books/' + id, {method: 'DELETE'}); go('');
+}
+
+/* ---------- 뷰어 ---------- */
+function openViewer(i) { viewer.i = i; $('#viewer').classList.add('open'); drawViewer(); }
+function closeViewer() { $('#viewer').classList.remove('open'); }
+function step(d) { viewer.i = Math.max(0, Math.min(viewer.pages.length - 1, viewer.i + d)); drawViewer(); }
+function setMode(m) { $('#viewer').classList.toggle('single', m === 'single'); try { localStorage.mtView = m } catch {} }
+function drawViewer() {
+  const p = viewer.pages[viewer.i], base = `/api/books/${viewer.book}/img`;
+  $('#vsrc').src = `${base}/src/${p.name}`;
+  $('#vko').src = p.translated ? `${base}/ko/${p.name}?v=${p.v}` : `${base}/src/${p.name}`;
+  $('#vpos').textContent = `${viewer.i + 1} / ${viewer.pages.length}`;
+  const label = {bubble: '말풍선', sanitize: '그림 위', keep: '그대로'};
+  $('#vblocks').innerHTML = p.blocks.length ? p.blocks.map(b => `
+    <div class="blk"><div class="ja">${esc(b.ja)}</div><div>${esc(b.mode === 'keep' ? '(유지)' : b.ko)}</div>
+      <div class="tag">${label[b.mode] || b.mode} · ${esc(b.kind)}${b.score != null ? ` · 점수 ${b.score}` : ''}</div></div>`).join('')
+    : '<div class="tag">글 없음</div>';
+}
+document.addEventListener('keydown', e => {
+  if (!$('#viewer').classList.contains('open')) return;
+  if (e.key === 'Escape') closeViewer();
+  if (e.key === 'ArrowRight' || e.key === 'd') step(1);
+  if (e.key === 'ArrowLeft' || e.key === 'a') step(-1);
+});
+try { if (localStorage.mtView) { $('#vmode').value = localStorage.mtView; setMode(localStorage.mtView); } } catch {}
+route();
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+[project]
+name = "manga-trans"
+version = "0.1.0"
+description = "만화 페이지 → 식질(OCR) → LLM 번역 → 한국어 식자. 웹 UI 포함"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "anime-tools",
+    "fastapi>=0.115",
+    "fonttools>=4.50",
+    "httpx>=0.28.1",
+    "numpy>=2.0",
+    "opencv-python>=4.10",                 # anime-tools와 같은 배포판(둘이 같은 cv2 자리를 덮어쓴다)
+    "pillow>=11.3",
+    "python-dotenv>=1.0",
+    "python-multipart>=0.0.20",
+    "torch>=2.6",
+    "transformers>=4.57",
+    "uvicorn>=0.30",
+]
+
+[tool.uv]
+override-dependencies = ["numpy>=2.0"]   # anime-tools 쪽 sam3의 numpy<2 고정을 푼다(anime-tools README 안내)
+
+[tool.uv.sources]
+anime-tools = { git = "https://github.com/sorryhyun/anime_tools", rev = "c5f67fa8f5b95003e2c2425aa5dea860da457fd7" }
+# Windows의 PyPI torch는 CPU 전용이라 CUDA 빌드를 받는다(Linux PyPI torch는 CUDA 포함)
+torch = [{ index = "pytorch-cu132", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
