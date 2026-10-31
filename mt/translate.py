@@ -3,6 +3,7 @@
 - make_bible: 작품 전체 대사(읽는 순서) + 일부 페이지 그림 → 설정집 JSON(줄거리·인물·호칭/말투·용어). 1회 호출.
 - translate: 페이지 이미지 + 블록 목록 (+ 설정집, 앞뒤 페이지 대사) → 블록별 {kind, ko}. 페이지당 1회 호출.
 - shorten: 말풍선에 안 들어가는 대사의 짧은 후보.
+- fix_japanese: 번역에 일본어(가나·한자)가 남은 항목만 다시 옮기기(페이지 번역·설정집 뒤에 자동으로).
 
 JSON 강제(format)는 백엔드마다 지원이 달라서 프롬프트로 JSON을 요구하고 응답에서 직접 파싱한다.
 """
@@ -78,20 +79,21 @@ def _to_openai(msgs):
     return out
 
 
-def _chat(msgs, retries=2, timeout=300, need="items", check=None):
+def _chat(msgs, retries=2, timeout=300, need="items", check=None, max_tokens=4096):
     """메시지를 보내고 응답에서 JSON 객체를 파싱해 (obj, 걸린 시간). need 키가 없는 응답은 재시도한다.
-    check(obj): 형식이 틀리면 ValueError(재시도, 끝내 틀리면 실패), 빠진 게 있으면 False(재시도, 끝내 그대로 받음)."""
+    check(obj): 형식이 틀리면 ValueError(재시도, 끝내 틀리면 실패), 빠진 게 있으면 False(재시도, 끝내 그대로 받음).
+    max_tokens: 생성 길이 상한 — 모델이 같은 말을 반복하는 데 빠지면 대기 시간이 끝날 때까지 안 끝나서."""
     local = any(h in config.LLM_URL for h in ("localhost", "127.0.0.1", "0.0.0.0"))
     if not config.LLM_KEY and not local:
         raise RuntimeError(f"번역 API 키가 없어요 ({config.LLM_URL}) — .env의 MT_LLM_KEY를 채우세요")
     headers = {"Authorization": f"Bearer {config.LLM_KEY}"} if config.LLM_KEY else {}
     if config.LLM_API == "openai":
         url = config.LLM_URL + "/chat/completions"
-        body = {"model": config.LLM_MODEL, "messages": _to_openai(msgs), "temperature": 0.3}
+        body = {"model": config.LLM_MODEL, "messages": _to_openai(msgs), "temperature": 0.3, "max_tokens": max_tokens}
     else:
         url = config.LLM_URL + "/api/chat"
         body = {"model": config.LLM_MODEL, "messages": msgs, "stream": False,
-                "options": {"temperature": 0.3, "num_ctx": config.LLM_CTX}}
+                "options": {"temperature": 0.3, "num_ctx": config.LLM_CTX, "num_predict": max_tokens}}
     t0 = time.time()
     for attempt in range(retries + 1):
         try:
@@ -123,7 +125,7 @@ def script_text(pages):
 def make_bible(pages, images=()):
     """pages: [(이름, 블록 목록)], images: [(이름, PIL 이미지)] 일부 페이지(인물 파악용)."""
     note = ("첨부 그림: " + ", ".join(n for n, _ in images) + "\n\n") if images else ""
-    obj, dt = _chat(need="characters", msgs=[{"role": "system", "content": BIBLE_SYSTEM},
+    obj, dt = _chat(need="characters", timeout=TIMEOUT_BIBLE, max_tokens=8192, msgs=[{"role": "system", "content": BIBLE_SYSTEM},
                      {"role": "user", "images": [_img_b64(im, 896) for _, im in images],
                       "content": note + "전체 대사:\n" + script_text(pages) + "\n\nJSON만 출력."}])
     return obj, dt
@@ -147,8 +149,19 @@ def translate(page: Image.Image, blocks, bible=None, prev_text="", next_text="")
                     + json.dumps(listing, ensure_ascii=False, indent=1) + "\n\nJSON만 출력."},
     ]
     want = {b.id for b in blocks if b.text}
-    obj, dt = _chat(msgs, check=lambda o: not _missing(want, _items(o, "ko")))
+    obj, dt = _chat(msgs, timeout=TIMEOUT_PAGE, check=lambda o: not _missing(want, _items(o, "ko")))
     items = _items(obj, "ko")
+    # 일본어가 남은 번역(예: 이름 일부가 가나 그대로)은 그 항목만 다시 옮긴다. 끝내 남으면 빠진 것으로 본다
+    left = {i: it for i, it in items.items() if i in want and it.get("kind") not in KINDS[2:] and has_japanese(it["ko"])}
+    if left:
+        text = {b.id: b.text for b in blocks}
+        try:
+            fixed, dt2 = fix_japanese([{"id": i, "ja": text[i], "ko": it["ko"]} for i, it in left.items()], bible)
+            dt += dt2
+        except (httpx.HTTPError, KeyError, ValueError, AttributeError):
+            fixed = {}      # 고치기 요청이 실패해도 페이지는 끝낸다(남은 항목은 빠진 것으로 → 다음 번역 때 다시)
+        for i, it in left.items():
+            it["ko"] = fixed.get(i, "")
     missing = _missing(want, items)
     for b in blocks:   # 끝내 빠진 블록은 ko가 비어 원문 그대로 두고(plan_page의 keep), 다음 번역 때 다시 요청한다
         it = items.get(b.id, {})
@@ -159,6 +172,117 @@ def translate(page: Image.Image, blocks, bible=None, prev_text="", next_text="")
 
 
 KINDS = ("dialogue", "text", "sfx", "sign", "symbol")
+TIMEOUT_PAGE = 90       # 페이지 번역은 보통 몇 초. 응답이 이만큼 없으면 끊고 다시 보낸다
+TIMEOUT_SHORT = 60
+TIMEOUT_BIBLE = 300     # 설정집은 작품 전체 대사라 오래 걸린다(스트리밍이 아니라 다 될 때까지 응답이 없음)
+_JA = re.compile(r"[\u3040-\u309F\u30A0-\u30FA\u30FD-\u30FF\u31F0-\u31FF\uFF66-\uFF9F\u4E00-\u9FFF]")
+
+
+def has_japanese(s):
+    """가나·한자가 있으면 True (장음 ー·가운뎃점 ・은 한국어 번역에도 쓰여서 뺀다)."""
+    return bool(_JA.search(s or ""))
+
+
+FIX_SYSTEM = """너는 일본 만화 번역 감수자야. 아래 한국어 번역(ko)에 일본어(가나·한자)가 섞여 남아 있다.
+남은 일본어 조각은 항목마다 left에 적어 두었다. 그 조각을 한국어로 바꿔서 ko 전체를 다시 써라.
+가나로 된 이름은 한국어 음차로(예: メアリ→메리, アリ→아리), 한자 단어는 뜻으로 옮긴다. 설정집이 있으면 그 표기를 따른다.
+일본어가 아닌 부분의 표현·말투·기호는 그대로 둔다. 결과 ko에는 가나·한자가 한 글자도 없어야 한다.
+출력은 JSON 하나: {"items": [{"id": id, "ko": "..."}]}"""
+
+
+def fix_japanese(items, bible=None):
+    """items: [{id, ja, ko}] → ({id: 일본어 없는 ko}, 걸린 시간).
+    LLM이 끝내 못 고친 항목은 가나를 기계 음차한다. 한자가 남는 항목은 빠진다."""
+    ctx = ("작품 설정집(이름 표기 참고):\n" + json.dumps(bible, ensure_ascii=False) + "\n\n") if bible else ""
+    ids = {it["id"] for it in items}
+    ask = [{**it, "left": _JA_RUN.findall(it["ko"])} for it in items]
+    clean = lambda o: {i: it["ko"] for i, it in _items(o, "ko").items() if i in ids and it["ko"].strip()
+                       and not has_japanese(it["ko"])}
+    obj, dt = _chat([{"role": "system", "content": FIX_SYSTEM},
+                     {"role": "user", "content": ctx + json.dumps(ask, ensure_ascii=False, indent=1) + "\n\nJSON만 출력."}],
+                    timeout=TIMEOUT_SHORT, check=lambda o: ids <= set(clean(o)))
+    out = clean(obj)
+    got = _items(obj, "ko")
+    for it in items:
+        if it["id"] not in out:
+            ko = kana_to_hangul(got[it["id"]]["ko"] if it["id"] in got else it["ko"])
+            if ko.strip() and not has_japanese(ko):
+                out[it["id"]] = ko
+    return out, dt
+
+
+_JA_RUN = re.compile(_JA.pattern + "+")
+# 가나 → 한글 기계 음차(LLM이 못 고칠 때의 최후 수단). 커뮤니티 표기 관례(カ→카, ツ→츠, 장음은 뺌)
+_KANA = dict(zip(
+    "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲ"
+    "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ",
+    "아이우에오카키쿠케코사시스세소타치츠테토나니누네노하히후헤호마미무메모야유요라리루레로와오"
+    "가기구게고자지즈제조다지즈데도바비부베보파피푸페포부"))
+_SMALL = {"ャ": "ㅑ", "ュ": "ㅠ", "ョ": "ㅛ", "ァ": "ㅏ", "ィ": "ㅣ", "ゥ": "ㅜ", "ェ": "ㅔ", "ォ": "ㅗ"}
+
+
+def kana_to_hangul(s):
+    """히라가나·가타카나(반각 포함)를 한글로. 한자는 그대로 둔다."""
+    import unicodedata
+    s = unicodedata.normalize("NFKC", s)                                  # 반각 가타카나 → 전각
+    s = "".join(chr(ord(c) + 0x60) if "\u3041" <= c <= "\u3096" else c for c in s)   # 히라가나 → 가타카나
+    out = []
+    for c in s:
+        if c in _KANA:
+            out.append(_KANA[c])
+        elif c in _SMALL and out and _is_syl(out[-1]):              # キャ → 캬: 앞 음절의 모음을 바꾼다
+            out[-1] = _with_vowel(out[-1], _SMALL[c])
+        elif c in ("ン", "ッ") and out and _is_syl(out[-1]):           # 받침 ㄴ / ㅅ
+            out[-1] = _with_final(out[-1], 4 if c == "ン" else 19)
+        elif c in ("ン",):
+            out.append("응")
+        elif c in "ッー":
+            continue
+        elif c in _SMALL:
+            out.append(_KANA["アイウエオ"["ャュョァィゥェォ".index(c) % 5]] if c in "ァィゥェォ" else "야유요"["ャュョ".index(c)])
+        else:
+            out.append(c)
+    return "".join(out)
+
+
+def _is_syl(c):
+    return "가" <= c <= "힣"
+
+
+def _with_vowel(c, jamo):
+    i = ord(c) - 0xAC00
+    v = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ".index(jamo)
+    return chr(0xAC00 + (i // 588) * 588 + v * 28 + i % 28)
+
+
+def _with_final(c, f):
+    i = ord(c) - 0xAC00
+    return chr(0xAC00 + i - i % 28 + f) if i % 28 == 0 else c
+
+
+def fix_bible(bible):
+    """설정집의 인물 이름·용어 번역어에 일본어가 남았으면 고치고, 설정집 전체에서 옛 표기를 새 표기로 바꾼다."""
+    spots = [(k, j) for k in ("characters", "terms") for j, x in enumerate(bible.get(k, [])) if has_japanese(x.get("ko"))]
+    if not spots:
+        return bible, []
+    items = [{"id": n, "ja": bible[k][j].get("ja", ""), "ko": bible[k][j]["ko"]} for n, (k, j) in enumerate(spots)]
+    try:
+        fixed, _ = fix_japanese(items, {k: v for k, v in bible.items() if k in ("characters", "terms")})
+    except (httpx.HTTPError, KeyError, ValueError, AttributeError):
+        fixed = {}
+    swap = {it["ko"]: fixed[it["id"]] for it in items if it["id"] in fixed}
+
+    def walk(v):
+        if isinstance(v, str):
+            for old, new in swap.items():
+                v = v.replace(old, new)
+            return v
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        return v
+    return walk(bible), len(items) - len(swap)
 
 
 def _missing(want, items):
@@ -195,7 +319,8 @@ SHORTEN_SYSTEM = """너는 만화 식자가야. 아래 한국어 대사들이 �
 def shorten(items, bible=None):
     """items: [{id, ja, ko, max_chars}] → {id: [후보...]}, 걸린 시간."""
     ctx = ("작품 설정집(이름·말투 참고):\n" + json.dumps(bible, ensure_ascii=False) + "\n\n") if bible else ""
-    obj, dt = _chat([{"role": "system", "content": SHORTEN_SYSTEM},
+    obj, dt = _chat(timeout=TIMEOUT_SHORT, msgs=[{"role": "system", "content": SHORTEN_SYSTEM},
                      {"role": "user", "content": ctx + json.dumps(items, ensure_ascii=False, indent=1)
                       + "\n\nJSON만 출력."}])
-    return {i: [c for c in it["cands"] if isinstance(c, str)] for i, it in _items(obj, "cands").items()}, dt
+    return {i: [c for c in it["cands"] if isinstance(c, str) and not has_japanese(c)]
+            for i, it in _items(obj, "cands").items()}, dt

@@ -249,6 +249,7 @@ function renderBookShell(id, b) {
       </select>
       <button class="primary" id="bdl" onclick="download('${id}','ko')">번역본 받기</button>
       <button onclick="download('${id}','src')">원본 받기</button>
+      <button class="busy-off" onclick="rerun('${id}','fix')" title="빠졌거나 일본어가 남은 번역만 다시 요청하고 식자">번역 빈 곳 채우기</button>
       <button class="busy-off" onclick="rerun('${id}','render')" title="번역은 그대로, 식자만 다시">식자만 다시</button>
       <button class="busy-off" onclick="rerun('${id}','all')" title="OCR부터 처음부터">처음부터 다시</button>
       <button class="danger busy-off" onclick="del('${id}')">삭제</button>

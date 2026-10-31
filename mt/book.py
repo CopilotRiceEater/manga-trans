@@ -105,8 +105,15 @@ def stage_ocr(book: Path, ocr=None, progress=_noop):
     save_json(book / "ocr.json", out)
 
 
-def stage_bible(book: Path, progress=_noop):
-    from translate import make_bible
+def stage_bible(book: Path, progress=_noop, refresh=True):
+    """refresh=False면 있는 설정집은 다시 만들지 않고 일본어가 남은 이름·용어만 고친다."""
+    from translate import fix_bible, make_bible
+    if not refresh and (book / "bible.json").exists():
+        bible, left = fix_bible(load_json(book / "bible.json"))
+        save_json(book / "bible.json", bible)
+        progress(1, 1, "설정집")
+        print("설정집: 일본어 남은 항목 고침" + (f" (못 고친 것 {left}개)" if left else ""))
+        return
     ocr = load_json(book / "ocr.json")
     names = list(ocr)
     # 인물 파악용 그림: 대사 많은 페이지 위주로 최대 8장
@@ -114,6 +121,9 @@ def stage_bible(book: Path, progress=_noop):
     images = [(n, Image.open(book / "src" / n)) for n in pick]
     bible, dt = make_bible([(name, d["blocks"]) for name, d in ocr.items()], images)
     bible = validate_bible(bible, ocr)
+    bible, left = fix_bible(bible)
+    if left:
+        print(f"설정집: 일본어가 남은 이름·용어 {left}개 (못 고침)")
     save_json(book / "bible.json", bible)
     progress(1, 1, "설정집")
     print(f"bible {dt:.1f}s")
@@ -166,8 +176,8 @@ def shorten_cached(book: Path, name: str, bible):
 
 
 def stage_translate(book: Path, workers=None, progress=_noop):
-    from concurrent.futures import ThreadPoolExecutor
-    from translate import script_text, translate
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from translate import KINDS, has_japanese, script_text, translate
     workers = workers or config.LLM_WORKERS
     ocr = load_json(book / "ocr.json")
     bible = load_json(book / "bible.json")
@@ -181,16 +191,25 @@ def stage_translate(book: Path, workers=None, progress=_noop):
             return name, [], 0.0
         prev = script_text([(names[i - 1], ocr[names[i - 1]]["blocks"])]) if i > 0 else ""
         nxt = script_text([(names[i + 1], ocr[names[i + 1]]["blocks"])]) if i + 1 < len(names) else ""
-        dt = translate(Image.open(book / "src" / name), blocks, bible, prev, nxt)
+        try:
+            dt = translate(Image.open(book / "src" / name), blocks, bible, prev, nxt)
+        except Exception as e:   # noqa: BLE001 — 한 페이지 실패로 작품 전체를 멈추지 않는다: 원문 유지 + 다음 번역 때 다시
+            print(f"{name}: 번역 실패 ({type(e).__name__}) — 원문 유지, 다음 번역 때 다시 요청")
+            for b in blocks:
+                b.extra.update(kind="dialogue", ko="", missing=bool(b.text))
+            dt = 0.0
         return name, [{"id": b.id, "kind": b.extra["kind"], "ko": b.extra["ko"]} | ({"missing": True} if b.extra["missing"] else {})
                       for b in blocks], dt
 
     t0 = time.time()
     # 아직 안 한 페이지 + 지난번에 번역이 빠진 블록이 있던 페이지
-    todo = [i for i, n in enumerate(names) if n not in trans or any(t.get("missing") for t in trans[n])]
-    with ThreadPoolExecutor(workers) as ex:
-        for k, (name, items, dt) in enumerate(ex.map(one, todo)):
+    redo = lambda t: t.get("missing") or (t.get("kind") not in KINDS[2:] and has_japanese(t.get("ko")))
+    todo = [i for i, n in enumerate(names) if n not in trans or any(redo(t) for t in trans[n])]
+    with ThreadPoolExecutor(workers) as ex:      # 끝나는 대로 저장(한 페이지가 늦어도 다른 결과를 잃지 않게)
+        futs = [ex.submit(one, i) for i in todo]
+        for k, (name, items, dt) in enumerate(f.result() for f in as_completed(futs)):
             trans[name] = items
+            trans = {n: trans[n] for n in names if n in trans}      # 저장 순서는 페이지 순서로
             miss = [t["id"] for t in items if t.get("missing")]
             print(f"{name}: {len(items)} items  {dt:.1f}s" + (f"  번역 빠짐 {miss} (원문 유지)" if miss else ""))
             save_json(book / "trans.json", trans)

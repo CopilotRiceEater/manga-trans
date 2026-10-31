@@ -214,7 +214,8 @@ def _run_job(bid, mode):
             for f in ("ocr.json", "bible.json", "trans.json", "short.json"):
                 (d / f).unlink(missing_ok=True)
             shutil.rmtree(d / "clean", ignore_errors=True)
-        stages = STAGES if mode == "all" else [s for s in STAGES if s[0] == "render"]
+        # all: 처음부터 / fix: OCR은 두고 설정집 고치기 + 빠진·일본어 남은 번역만 다시 + 식자 / render: 식자만
+        stages = {"all": STAGES, "fix": STAGES[1:], "render": STAGES[3:]}[mode]
         for key, label in stages:
             save_meta(bid, status="running", stage=key, stage_label=label, progress=[0, 1])
 
@@ -226,7 +227,7 @@ def _run_job(bid, mode):
                     _ocr = OCR()
                 bk.stage_ocr(d, ocr=_ocr, progress=prog)
             elif key == "bible":
-                bk.stage_bible(d, progress=prog)
+                bk.stage_bible(d, progress=prog, refresh=mode == "all")
             elif key == "translate":
                 bk.stage_translate(d, progress=prog)
             else:
@@ -292,8 +293,8 @@ def get_book(bid: str):
 @app.post("/api/books/{bid}/run")
 def run_book(bid: str, mode: str = Form("all")):
     book_dir(bid)
-    if mode not in ("all", "render"):
-        raise HTTPException(400, "mode는 all 또는 render")
+    if mode not in ("all", "fix", "render"):
+        raise HTTPException(400, "mode는 all / fix / render")
     enqueue(bid, mode)
     return load_meta(bid)
 
