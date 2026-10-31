@@ -6,6 +6,7 @@
 
 clean(page_path, page, masks) → 지운 결과 이미지 경로(페이지와 같은 크기가 아니어도 됨: 합성할 때 맞춘다).
 """
+import shutil
 import urllib.request
 from pathlib import Path
 
@@ -34,7 +35,8 @@ def _lama_model():
             path.parent.mkdir(parents=True, exist_ok=True)
             print(f"[inpaint] LaMa 받는 중 → {path}")
             tmp = path.with_suffix(".part")
-            urllib.request.urlretrieve(config.LAMA_URL, tmp)
+            with urllib.request.urlopen(config.LAMA_URL, timeout=60) as r, open(tmp, "wb") as f:   # 60초 무응답이면 실패
+                shutil.copyfileobj(r, f, 1 << 20)
             tmp.replace(path)
         dev = "cpu"
         if torch.cuda.is_available() and torch.cuda.mem_get_info()[0] / 2**30 >= 1.5:   # GPU가 꽉 차 있으면 CPU

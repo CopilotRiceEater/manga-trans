@@ -7,6 +7,7 @@
 """
 import io
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -37,6 +38,7 @@ MAX_PAGES = 3000
 MAX_IMAGE_BYTES = 200 * 2**20
 MAX_TOTAL_BYTES = 8 * 2**30
 MAX_PIXELS = 60_000_000           # 한 장 약 6000×10000
+MAX_ZIP_ENTRIES = 50_000          # 이미지 아닌 항목 포함
 
 app = FastAPI()
 _lock = threading.Lock()          # meta.json 쓰기
@@ -58,6 +60,8 @@ async def _same_origin(request: Request, call_next):
         return JSONResponse({"detail": "다른 사이트에서 온 요청은 받지 않아요"}, 403)
     if _LOOPBACK and urlparse("//" + host).hostname not in ("127.0.0.1", "localhost", "::1"):
         return JSONResponse({"detail": "Host 헤더가 맞지 않아요"}, 403)
+    if int(request.headers.get("content-length") or 0) > MAX_TOTAL_BYTES:   # 본문을 받기 전에 거절
+        return JSONResponse({"detail": f"업로드가 너무 커요 (최대 {MAX_TOTAL_BYTES >> 30}GB)"}, 413)
     return await call_next(request)
 
 
@@ -83,9 +87,7 @@ def save_meta(bid, **kw):
     with _lock:
         m = bk.load_json(meta_path(bid), None) or {"id": bid}
         m.update(kw)
-        tmp = meta_path(bid).with_suffix(".tmp")
-        tmp.write_text(json.dumps(m, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-        tmp.replace(meta_path(bid))
+        bk.atomic_write(meta_path(bid), json.dumps(m, ensure_ascii=False, indent=1, default=str))
         return m
 
 
@@ -107,6 +109,8 @@ def _collect(files):
                 z = zipfile.ZipFile(f.file)
             except zipfile.BadZipFile:
                 raise HTTPException(400, f"ZIP을 열 수 없어요: {name}")
+            if len(z.infolist()) > MAX_ZIP_ENTRIES:
+                raise HTTPException(413, f"ZIP 안 파일이 너무 많아요 (최대 {MAX_ZIP_ENTRIES}개): {name}")
             for info in z.infolist():
                 n = info.filename
                 if info.is_dir() or n.startswith("__MACOSX") or not n.lower().endswith(bk.IMAGE_EXT):
@@ -155,13 +159,13 @@ def create_book(title: str = Form(""), autorun: bool = Form(True), files: list[U
         width = max(3, len(str(len(imgs))))
         for i, (name, _, read) in enumerate(imgs, 1):
             _decode(name, read).save(src / f"{i:0{width}d}.png")
-        tmp.rename(BOOKS / bid)
+        meta = {"id": bid, "title": title or Path(files[0].filename or bid).stem, "created": time.time(),
+                "status": "new", "source": [n for n, _, _ in imgs]}
+        (tmp / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.rename(BOOKS / bid)     # 메타까지 다 쓴 뒤에 한 번에 공개
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    if not title:
-        title = Path(files[0].filename or bid).stem
-    save_meta(bid, title=title, created=time.time(), status="new", source=[n for n, _, _ in imgs])
     if autorun:
         enqueue(bid, "all")
     return load_meta(bid)
@@ -176,8 +180,12 @@ def enqueue(bid, mode):
         if not (BOOKS / bid).is_dir():
             raise HTTPException(404, "없는 작품")
         _pending.add(bid)
-        save_meta(bid, status="queued", mode=mode, error=None, stage=None, progress=None)
-    _queue.put((bid, mode))
+        try:
+            save_meta(bid, status="queued", mode=mode, error=None, stage=None, progress=None)
+            _queue.put((bid, mode))
+        except BaseException:
+            _pending.discard(bid)
+            raise
 
 
 def _worker():
@@ -236,9 +244,15 @@ threading.Thread(target=_worker, daemon=True).start()
 
 @app.on_event("startup")
 def _resume():
-    """서버가 작업 도중 꺼졌던 작품은 다시 큐에 넣는다."""
+    """서버가 작업 도중 꺼졌던 작품은 다시 큐에 넣고, 업로드·내보내기 도중 꺼져 남은 임시 파일은 지운다."""
     BOOKS.mkdir(exist_ok=True)
+    for d in BOOKS.glob(".up-*"):
+        shutil.rmtree(d, ignore_errors=True)
+    for f in BOOKS.glob("*/.export-*.zip"):
+        f.unlink(missing_ok=True)
     for d in sorted(BOOKS.iterdir()):
+        if d.name.startswith("."):
+            continue
         m = bk.load_json(d / "meta.json", None)
         if m and m.get("status") in ("queued", "running"):
             enqueue(d.name, m.get("mode", "all"))
@@ -335,10 +349,13 @@ def export(bid: str, fmt: str = "png", which: str = "ko"):
     files = [p for p in (_ko_path(d, p.name) for p in bk.pages(d)) if p.exists()] if which == "ko" else bk.pages(d)
     if not files:
         raise HTTPException(404, "번역본이 아직 없어요")
-    if not _export.acquire(blocking=False):
+    if not _export.acquire(blocking=False):     # ZIP 만들기(CPU·디스크)를 동시에 2개까지
         raise HTTPException(429, "다른 내보내기가 진행 중이에요. 잠시 뒤에 다시 해 주세요")
-    tmp = Path(tempfile.mkstemp(suffix=".zip", prefix=".export-", dir=d)[1])   # 메모리 대신 임시 파일
+    tmp = None
     try:
+        fd, name = tempfile.mkstemp(suffix=".zip", prefix=".export-", dir=d)   # 메모리 대신 임시 파일
+        os.close(fd)
+        tmp = Path(name)
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:
             for f in files:
                 if f.suffix.lower() == ext:
@@ -347,12 +364,13 @@ def export(bid: str, fmt: str = "png", which: str = "ko"):
                     b = io.BytesIO()
                     Image.open(f).convert("RGB").save(b, pil_fmt, **opts)
                     z.writestr(f.stem + ext, b.getvalue())
+        title = re.sub(r'[\\/:*?"<>|]+', "_", load_meta(bid).get("title") or bid)
     except BaseException:
-        tmp.unlink(missing_ok=True)
+        if tmp:
+            tmp.unlink(missing_ok=True)
         raise
     finally:
         _export.release()
-    title = re.sub(r'[\\/:*?"<>|]+', "_", load_meta(bid).get("title") or bid)
     name = quote(f"{title}_{'번역' if which == 'ko' else '원본'}_{fmt}.zip")
     return FileResponse(tmp, media_type="application/zip", background=BackgroundTask(tmp.unlink, missing_ok=True),
                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{name}"})

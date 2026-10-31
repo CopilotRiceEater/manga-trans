@@ -104,13 +104,17 @@ def split_shared(plan, shape):
         union |= it.mask
     ys, xs = np.nonzero(union)
     y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
-    dists = []
-    for _, b, _ in live:
+    # 블록별 거리 지도를 다 쌓지 않고 최솟값·주인만 갱신(큰 페이지 × 블록 수만큼 RAM을 쓰지 않게)
+    best = np.full((y1 - y0, x1 - x0), np.inf, np.float32)
+    owner = np.zeros((y1 - y0, x1 - x0), np.int32)
+    for k, (_, b, _) in enumerate(live):
         rect = np.ones((y1 - y0, x1 - x0), np.uint8)
         bx0, by0, bx1, by1 = b.box
         rect[max(0, by0 - y0):max(0, by1 - y0), max(0, bx0 - x0):max(0, bx1 - x0)] = 0
-        dists.append(cv2.distanceTransform(rect, cv2.DIST_L2, 3))
-    owner = np.argmin(np.stack(dists), axis=0)
+        d = cv2.distanceTransform(rect, cv2.DIST_L2, 3)
+        closer = d < best
+        best[closer] = d[closer]
+        owner[closer] = k
     for k, (i, b, it) in enumerate(live):
         others = [j for j, (_, _, o) in enumerate(live) if j != k and (o.mask[y0:y1, x0:x1] & it.mask[y0:y1, x0:x1]).any()]
         if not others:
@@ -129,6 +133,14 @@ def render_page(page: Image.Image, plan, clean_path=None, base=None, median_g=No
     shorten_fn(items) → {id: [후보]}: 1~4단계에서 실패한 블록만 모아 한 번 부른다(engine 5단계).
     panels: 칸 목록(말풍선 키우기가 칸 밖으로 못 나가게). 없으면 이 페이지에서 계산."""
     rgb = np.array(page.convert("RGB"))
+    # 식자 영역이 안 나오는 블록(나눈 뒤 비는 경우)은 지우지 않고 원문 그대로 둔다 — 지우기만 하고 글이 없으면 안 되므로
+    plan = list(plan)
+    areas = split_shared(plan, rgb.shape[:2])
+    unplaced = {i for i, (b, it, mode) in enumerate(plan) if mode != "keep" and make_area(areas[i], b.box) is None}
+    if unplaced:
+        for i in unplaced:
+            plan[i] = (plan[i][0], None, "keep")
+        areas = split_shared(plan, rgb.shape[:2])
     san = [it.mask for _, it, mode in plan if mode == "sanitize"]
     if san:
         composite_sanitized(rgb, clean_path, san)
@@ -143,12 +155,12 @@ def render_page(page: Image.Image, plan, clean_path=None, base=None, median_g=No
     if faces is None:
         from letter import DEFAULT_FONTS, face
         faces = {role: face(p) for role, p in DEFAULT_FONTS.items()}
-    areas = split_shared(plan, rgb.shape[:2])
     jobs = {}
     for i, (b, it, mode) in enumerate(plan):
         if mode == "keep":
             continue
-        area = make_area(areas[i], b.box)
+        # 다시 나눈 뒤에도 영역이 빈 경우(드묾)는 이미 지워졌으니 나누기 전 영역에라도 넣는다
+        area = make_area(areas[i], b.box) or make_area(it, b.box)
         if area is not None:
             jobs[i] = (b, area, block_spec(b, base, median_g, mode, faces), mode)
     first = {i: try_chain(a, b.extra["ko"], sp) for i, (b, a, sp, _) in jobs.items()}
@@ -181,6 +193,8 @@ def render_page(page: Image.Image, plan, clean_path=None, base=None, median_g=No
                  "ja": b.text, "ko": b.extra.get("ko"), "font_px": 0}
         if i in expansions:
             entry["grow"] = expansions[i].grow
+        if i in unplaced:
+            entry["unplaced"] = True
         if i in jobs:
             _, area, spec, _ = jobs[i]
             pl = placed[i]

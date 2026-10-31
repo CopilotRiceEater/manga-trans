@@ -6,8 +6,10 @@
   uv run python mt/book.py books/<이름> render     # → ko/*.png
 """
 import json
+import os
 import re
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -42,10 +44,27 @@ def _natural_key(s):
 
 
 def save_json(path: Path, obj):
-    """임시 파일에 쓰고 바꿔 끼운다(웹 UI가 쓰는 도중의 파일을 읽지 않게)."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1, default=int), encoding="utf-8")
-    tmp.replace(path)
+    atomic_write(path, json.dumps(obj, ensure_ascii=False, indent=1, default=int))
+
+
+def atomic_write(path: Path, text: str):
+    """고유한 임시 파일에 쓰고 바꿔 끼운다(웹 UI가 쓰는 도중의 파일을 읽지 않게).
+    Windows에서는 다른 쪽이 읽느라 열어 둔 파일을 잠깐 못 바꿀 수 있어 몇 번 다시 시도한다."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def blocks_from(d):
@@ -105,8 +124,10 @@ def validate_bible(bible, ocr):
     """설정집 자동 검증: 인물은 원문 이름이 실제 글에 나와야 하고, 그 이름 하나만 덩그러니 있는 블록
     (작가명·크레딧)에만 나오면 인물이 아니라고 본다. 빠진 이름은 terms에 '표기만'으로 남긴다."""
     texts = [b["text"] for d in ocr.values() for b in d["blocks"] if b.get("text")]
-    for k in ("characters", "address", "terms"):     # LLM이 형식을 틀리게 준 항목은 버린다
-        bible[k] = [x for x in bible.get(k) or [] if isinstance(x, dict)] if isinstance(bible.get(k), list) else []
+    for k in ("characters", "address", "terms"):     # LLM이 형식을 틀리게 준 항목은 버리고, 값은 문자열로
+        items = bible.get(k) if isinstance(bible.get(k), list) else []
+        bible[k] = [{f: v if isinstance(v, str) else "" if v is None else json.dumps(v, ensure_ascii=False)
+                     for f, v in x.items()} for x in items if isinstance(x, dict)]
     keep, dropped = [], []
     for c in bible["characters"]:
         names = [n for n in re.split(r"[/・()（）、, ]+", str(c.get("ja") or "")) if n]
@@ -161,14 +182,17 @@ def stage_translate(book: Path, workers=None, progress=_noop):
         prev = script_text([(names[i - 1], ocr[names[i - 1]]["blocks"])]) if i > 0 else ""
         nxt = script_text([(names[i + 1], ocr[names[i + 1]]["blocks"])]) if i + 1 < len(names) else ""
         dt = translate(Image.open(book / "src" / name), blocks, bible, prev, nxt)
-        return name, [{"id": b.id, "kind": b.extra["kind"], "ko": b.extra["ko"]} for b in blocks], dt
+        return name, [{"id": b.id, "kind": b.extra["kind"], "ko": b.extra["ko"]} | ({"missing": True} if b.extra["missing"] else {})
+                      for b in blocks], dt
 
     t0 = time.time()
-    todo = [i for i, n in enumerate(names) if n not in trans]
+    # 아직 안 한 페이지 + 지난번에 번역이 빠진 블록이 있던 페이지
+    todo = [i for i, n in enumerate(names) if n not in trans or any(t.get("missing") for t in trans[n])]
     with ThreadPoolExecutor(workers) as ex:
         for k, (name, items, dt) in enumerate(ex.map(one, todo)):
             trans[name] = items
-            print(f"{name}: {len(items)} items  {dt:.1f}s")
+            miss = [t["id"] for t in items if t.get("missing")]
+            print(f"{name}: {len(items)} items  {dt:.1f}s" + (f"  번역 빠짐 {miss} (원문 유지)" if miss else ""))
             save_json(book / "trans.json", trans)
             progress(k + 1, len(todo), name)
     print(f"translate total {time.time() - t0:.1f}s ({len(todo)} pages, {workers} workers)")
@@ -233,9 +257,9 @@ def stage_render(book: Path, fonts=None, tag=None, progress=_noop):
     scores, unplaced = [], []
     for name, log in report.items():
         for r in log:
-            if r["mode"] == "keep":
+            if r["mode"] == "keep" and not r.get("unplaced"):
                 continue
-            if r.get("score") is None:      # 지울 영역이 비어 식자하지 못한 블록
+            if r.get("unplaced") or r.get("score") is None:      # 식자 영역이 안 나와 원문 그대로 둔 블록
                 unplaced.append((name, r["id"]))
                 continue
             scores.append(r["score"])

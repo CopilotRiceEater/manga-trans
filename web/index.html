@@ -131,14 +131,16 @@ async function api(path, opts) {
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m } catch {} throw new Error(m); }
   return r.json();
 }
-function go(id) { location.hash = id ? '#/' + id : ''; }
+const U = encodeURIComponent;   // URL 경로 조각(작품 ID·페이지 이름)은 항상 인코딩
+function go(id) { location.hash = id ? '#/' + U(id) : ''; }
 window.addEventListener('hashchange', route);
 
 function route() {
   clearTimeout(timer);
   shownBook = null;
   let id = location.hash.replace(/^#\/?/, '');
-  if (!/^[\w-]*$/.test(id)) id = '';     // 작품 ID 형식만 (onclick·API 경로에 그대로 들어간다)
+  try { id = decodeURIComponent(id); } catch { id = ''; }
+  if (!/^[\p{L}\p{N}\p{M}_-]*$/u.test(id)) id = '';     // 서버의 작품 ID 규칙([\w-]+)과 같게 (onclick에 들어간다)
   current = id || null;
   id ? showBook(id) : showList();
 }
@@ -199,7 +201,7 @@ async function refreshList() {
         card.innerHTML = `<div class="cover"></div><div class="body"><div class="title"></div><div class="meta info"></div><div class="prog"></div></div>`;
       }
       if (el.children[i] !== card) el.insertBefore(card, el.children[i] || null);
-      const cover = `url("/api/books/${b.id}/img/${b.status === 'done' ? 'ko' : 'src'}/${firstPage(b)}?w=360&v=${b.finished || 0}")`;
+      const cover = `url("/api/books/${U(b.id)}/img/${b.status === 'done' ? 'ko' : 'src'}/${U(firstPage(b))}?w=360&v=${b.finished || 0}")`;
       const cv = card.querySelector('.cover');
       if (cv.dataset.url !== cover) { cv.dataset.url = cover; cv.style.backgroundImage = cover; }
       const t = card.querySelector('.title'); if (t.textContent !== b.title) { t.textContent = b.title; t.title = b.title; }
@@ -227,7 +229,7 @@ async function updateQueue() {
 let shownBook = null;
 async function showBook(id) {
   let b;
-  try { b = await api('/api/books/' + id); } catch (e) { app.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  try { b = await api('/api/books/' + U(id)); } catch (e) { app.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   if (current !== id) return;
   if (shownBook !== id || !$('#pages')) { renderBookShell(id, b); shownBook = id; }
   updateBook(id, b);
@@ -277,14 +279,15 @@ function updateBook(id, b) {
   setText('#berr', b.status === 'error' ? b.error : '');
   const sm = b.summary;
   setText('#bsum', sm && !busy ? `${b.pages}쪽 · 블록 ${sm.blocks}개 · 평균 점수 ${sm.avg} · 기본 글자 ${sm.base_px}px` +
-    (b.elapsed ? ` · ${b.elapsed}초` : '') + (sm.sanitized?.length ? ` · 그림 위 글 지움 ${sm.sanitized.length}쪽` : '') : '');
+    (b.elapsed ? ` · ${b.elapsed}초` : '') + (sm.sanitized?.length ? ` · 그림 위 글 지움 ${sm.sanitized.length}쪽` : '') +
+    (sm.unplaced ? ` · 자리가 없어 원문 유지 ${sm.unplaced}개` : '') : '');
   const bh = bibleHtml(b.bible), bb = $('#bbible');
   if (bb.dataset.h !== bh) { const open = bb.querySelector('details')?.open; bb.innerHTML = bh; bb.dataset.h = bh;
                              if (open) bb.querySelector('details').open = true; }
   const cards = document.querySelectorAll('#pages .page');
   b.pages_detail.forEach((p, i) => {
     const card = cards[i]; if (!card) return;
-    const url = `/api/books/${id}/img/${p.translated ? 'ko' : 'src'}/${p.name}?w=360&v=${p.v}`;
+    const url = `/api/books/${U(id)}/img/${p.translated ? 'ko' : 'src'}/${U(p.name)}?w=360&v=${p.v}`;
     const img = card.querySelector('img');
     if (img.dataset.url !== url) {          // 바뀐 페이지만 새로 받는다 — 다 받은 뒤 바꿔 끼워서 깜빡임 없음
       img.dataset.url = url;
@@ -304,14 +307,14 @@ function bibleHtml(bb) {
     <table><tr><th>용어</th><th>원문</th><th>설명</th></tr>${rows(bb.terms, ['ko', 'ja', 'note'])}</table>
   </details>`;
 }
-function download(id, which) { location.href = `/api/books/${id}/export?fmt=${$('#fmt').value}&which=${which}`; }
+function download(id, which) { location.href = `/api/books/${U(id)}/export?fmt=${$('#fmt').value}&which=${which}`; }
 async function rerun(id, mode) {
   const fd = new FormData(); fd.append('mode', mode);
-  await api(`/api/books/${id}/run`, {method: 'POST', body: fd}); showBook(id);
+  await api(`/api/books/${U(id)}/run`, {method: 'POST', body: fd}); showBook(id);
 }
 async function del(id) {
   if (!confirm('이 작품을 지울까요? 원본과 번역본이 모두 지워져요.')) return;
-  await api('/api/books/' + id, {method: 'DELETE'}); go('');
+  await api('/api/books/' + U(id), {method: 'DELETE'}); go('');
 }
 
 /* ---------- 뷰어 ---------- */
@@ -320,9 +323,9 @@ function closeViewer() { $('#viewer').classList.remove('open'); }
 function step(d) { viewer.i = Math.max(0, Math.min(viewer.pages.length - 1, viewer.i + d)); drawViewer(); }
 function setMode(m) { $('#viewer').classList.toggle('single', m === 'single'); try { localStorage.mtView = m } catch {} }
 function drawViewer() {
-  const p = viewer.pages[viewer.i], base = `/api/books/${viewer.book}/img`;
-  $('#vsrc').src = `${base}/src/${p.name}`;
-  $('#vko').src = p.translated ? `${base}/ko/${p.name}?v=${p.v}` : `${base}/src/${p.name}`;
+  const p = viewer.pages[viewer.i], base = `/api/books/${U(viewer.book)}/img`;
+  $('#vsrc').src = `${base}/src/${U(p.name)}`;
+  $('#vko').src = p.translated ? `${base}/ko/${U(p.name)}?v=${p.v}` : `${base}/src/${U(p.name)}`;
   $('#vpos').textContent = `${viewer.i + 1} / ${viewer.pages.length}`;
   const label = {bubble: '말풍선', sanitize: '그림 위', keep: '그대로'};
   $('#vblocks').innerHTML = p.blocks.length ? p.blocks.map(b => `

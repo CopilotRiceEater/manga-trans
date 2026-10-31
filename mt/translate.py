@@ -147,13 +147,23 @@ def translate(page: Image.Image, blocks, bible=None, prev_text="", next_text="")
                     + json.dumps(listing, ensure_ascii=False, indent=1) + "\n\nJSON만 출력."},
     ]
     want = {b.id for b in blocks if b.text}
-    obj, dt = _chat(msgs, check=lambda o: want <= set(_items(o, "ko")))
+    obj, dt = _chat(msgs, check=lambda o: not _missing(want, _items(o, "ko")))
     items = _items(obj, "ko")
-    for b in blocks:   # 끝내 빠진 블록은 ko가 비어 원문 그대로 둔다(plan_page의 keep)
+    missing = _missing(want, items)
+    for b in blocks:   # 끝내 빠진 블록은 ko가 비어 원문 그대로 두고(plan_page의 keep), 다음 번역 때 다시 요청한다
         it = items.get(b.id, {})
-        b.extra["kind"] = it.get("kind") if isinstance(it.get("kind"), str) else "dialogue"
+        b.extra["kind"] = it["kind"] if it.get("kind") in KINDS else "dialogue"
         b.extra["ko"] = it.get("ko", "")
+        b.extra["missing"] = b.id in missing
     return dt
+
+
+KINDS = ("dialogue", "text", "sfx", "sign", "symbol")
+
+
+def _missing(want, items):
+    """번역이 와야 하는데 없거나 빈 블록 id."""
+    return {i for i in want if i not in items or (items[i].get("kind") not in KINDS[2:] and not items[i]["ko"].strip())}
 
 
 def _items(obj, field):
@@ -162,9 +172,10 @@ def _items(obj, field):
     for it in obj.get("items") or []:
         if not isinstance(it, dict):
             continue
-        try:
-            i = int(it.get("id"))
-        except (TypeError, ValueError):
+        i = it.get("id")
+        if isinstance(i, str) and i.strip().isdigit():
+            i = int(i)
+        if not isinstance(i, int) or isinstance(i, bool) or i in out:
             continue
         v = it.get(field)
         if (field == "ko" and isinstance(v, str)) or (field == "cands" and isinstance(v, list)):
