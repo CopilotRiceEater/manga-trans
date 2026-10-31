@@ -4,7 +4,7 @@
 원문이 눈에 띄게 큰 블록(외침·강조)만 target을 키운다(최대 3·base).
 
 체인 (앞에서 성공하면 끝):
-  1 어절 줄바꿈, target→floor, 기본 여백 (VERTICAL이면 세로로 긴 영역은 세로쓰기와 비교 — 기본 꺼짐)
+  1 어절 줄바꿈, target→floor, 기본 여백 (세로로 긴 영역은 한 열 세로쓰기와 비교 — 두 열 이상 세로쓰기는 안 함)
   2 어절 줄바꿈, target→floor, 좁은 여백·줄간격 1.0
   3 한 어절짜리면 음절 단위, target→floor
   4 말풍선 키우기(expand.py) 후 1~3 재시도 — 번역문을 살리는 쪽이 먼저. 같은 칸·다른 말풍선과 안 겹칠 때만
@@ -69,8 +69,9 @@ def _sizes(hi, lo):
     return range(hi, lo - 1, -1)
 
 
-VERTICAL = False    # 한국어 세로쓰기 사용 여부 — 읽기 어색해서 기본 끔
-VERT_GAIN = 1.25    # (켰을 때) 세로쓰기가 이만큼 더 크게 들어가야 가로 대신 쓴다
+VERTICAL = True     # 한국어 세로쓰기 사용 여부 — 한 열로 다 들어갈 때만(세로로 긴 외침 등)
+VERT_MAX_COLS = 1   # 두 열 이상 세로쓰기는 읽기 어색해서 금지
+VERT_GAIN = 1.25    # 세로쓰기가 이만큼 더 크게 들어가야 가로 대신 쓴다
 VERT_MAX_SYL = 24
 
 
@@ -86,7 +87,7 @@ def try_chain(area: Area, text: str, spec: Spec):
     lay = fit(area, text, sz, "word", fc=f)
     if VERTICAL and _tall(area) and len(text.replace(" ", "")) <= VERT_MAX_SYL:
         floor_v = max(spec.floor, int(lay.size * VERT_GAIN)) if lay else spec.floor
-        vert = fit_vert(area, text, _sizes(spec.target, floor_v), fc=f)
+        vert = fit_vert(area, text, _sizes(spec.target, floor_v), fc=f, max_cols=VERT_MAX_COLS)
         if vert and (not lay or vert.size >= lay.size * VERT_GAIN):
             return vert, 1
     if lay:
@@ -104,7 +105,7 @@ def try_chain(area: Area, text: str, spec: Spec):
 def final_fit(area: Area, text: str, spec: Spec) -> Layout:
     f, sz = spec.face, _sizes(spec.target, MIN_PX)
     cands = [fit(area, text, sz, "word", loose=True, line_h=1.0, fc=f),
-             fit_vert(area, text, sz, loose=True, fc=f) if VERTICAL and _tall(area) else None,
+             fit_vert(area, text, sz, loose=True, fc=f, max_cols=VERT_MAX_COLS) if VERTICAL and _tall(area) else None,
              fit(area, text, sz, "char", loose=True, line_h=1.0, fc=f)]
     lay = max((c for c in cands if c), key=lambda c: c.size, default=None)
     if lay:

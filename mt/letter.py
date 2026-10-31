@@ -348,15 +348,19 @@ def _ink_ok(lay):
     return ink_check(lay)[0] == 0
 
 
-VERT_MAP = {"…": "︙", "‥": "︰", "ー": "｜", "—": "︱", "~": "︴", "～": "︴", "(": "︵", ")": "︶",
-            ",": "︐", ".": "︒", "、": "︑", "。": "︒"}
+# 세로쓰기용 대체 글자. 번들 글꼴에는 세로형 문장부호(︙ ︐ ︒ ︵ 등)가 없어서(두부로 찍힘) 있는 글자로 바꾸고,
+# 쉼표·마침표·괄호는 한국어 세로 식자 관례대로 뺀다(""). 물결표는 그대로 둔다.
+VERT_MAP = {"…": "⋮", "‥": "⋮", "ー": "｜", "—": "｜", "―": "｜", "～": "~",
+            ",": "", ".": "", "、": "", "。": "", "(": "", ")": "", "（": "", "）": ""}
 
 
 def _vert_cells(word):
     """세로쓰기 칸: 음절 하나씩, 연속된 !?는 한 칸(가로로 묶음), 말줄임표 등은 세로형 글리프로."""
     cells = []
-    for ch in word:
+    for ch in word.replace("...", "…"):     # 마침표 셋은 말줄임표(마침표는 빼므로)
         ch = VERT_MAP.get(ch, ch)
+        if not ch:
+            continue
         if ch in "!?！？" and cells and all(c in "!?！？" for c in cells[-1]):
             cells[-1] += ch
         else:
@@ -364,8 +368,10 @@ def _vert_cells(word):
     return cells
 
 
-def fit_vert(area: Area, text: str, sizes, loose=False, col_gap=1.18, cell_h=1.12, fc: Face = None) -> Layout | None:
-    """한국어 세로쓰기: 칸을 위→아래로 쌓고 열은 오른쪽→왼쪽. 열은 어절 경계에서 나눈다(DP로 열 길이 고르게)."""
+def fit_vert(area: Area, text: str, sizes, loose=False, col_gap=1.18, cell_h=1.12, fc: Face = None,
+             max_cols=None) -> Layout | None:
+    """한국어 세로쓰기: 칸을 위→아래로 쌓고 열은 오른쪽→왼쪽. 열은 어절 경계에서 나눈다(DP로 열 길이 고르게).
+    max_cols: 열 수 상한(None이면 제한 없음)."""
     fc = fc or DEFAULT
     safe = area.loose if loose else area.safe
     words = text.split()
@@ -375,7 +381,7 @@ def fit_vert(area: Area, text: str, sizes, loose=False, col_gap=1.18, cell_h=1.1
         cw = int(size * cw_ratio)
         units = [(w, i > 0) for i, w in enumerate(words)]
         heights = [len(_vert_cells(w)) * ch for w in words]
-        for ncol in range(1, len(words) + 1):
+        for ncol in range(1, min(len(words), max_cols or len(words)) + 1):
             cols = _wrap(units, ncol, heights, ch * 0.5)
             if not cols:
                 continue
